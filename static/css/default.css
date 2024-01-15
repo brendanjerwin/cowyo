@@ -202,3 +202,17 @@ wiki-search#site-search {
   margin: auto;
   margin-right: .35em;
 }
+
+button#llmEditMenuButton {
+  margin-top: .25em;
+}
+
+li.llmEditMenuButton {
+  display: none !important;
+}
+
+@media screen and (min-width: 800px) and (min-height: 800px) {
+  li.llmEditMenuButton {
+    display: inline-block !important;
+  }
+}

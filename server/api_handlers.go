@@ -1,9 +1,12 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/brendanjerwin/simple_wiki/labels"
+	llmEditor "github.com/brendanjerwin/simple_wiki/llm/editor"
+	"github.com/brendanjerwin/simple_wiki/templating"
 	"github.com/gin-gonic/gin"
 )
 
@@ -112,4 +115,143 @@ func (s *Site) handleSearch(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"success": true, "results": results})
+}
+
+func (s *Site) handleContinueLlmEdit(c *gin.Context) {
+	type Req struct {
+		InteractionID llmEditor.InteractionID `json:"interaction_id" binding:"required"`
+		Answer        string                  `json:"answer" binding:"required"`
+	}
+	type Resp struct {
+		InteractionID  llmEditor.InteractionID `json:"interaction_id"`
+		OpenQuestions  []string                `json:"open_questions"`
+		NewContentHtml string                  `json:"new_content"`
+		ResponseToUser string                  `json:"response_to_user"`
+	}
+
+	var req Req
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Problem binding keys: " + err.Error()})
+		return
+	}
+	interaction, err := llmEditor.RestoreInteractionFromRAM(req.InteractionID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Problem restoring interaction: " + err.Error()})
+		return
+	}
+
+	interaction, err = interaction.Respond(req.Answer)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Problem responding to edit: " + err.Error()})
+		return
+	}
+
+	resp := Resp{
+		InteractionID: interaction.InteractionID,
+	}
+
+	resp.OpenQuestions = interaction.LastResponse.Memory.OpenQuestions
+
+	err, html := s.renderAnyMarkdownAsPage(interaction.PageIdentifier, interaction.LastResponse.NewContent)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Problem rendering new content: " + err.Error()})
+	}
+	resp.NewContentHtml = string(html)
+	resp.ResponseToUser = interaction.LastResponse.ResponseToUser
+
+	c.JSON(http.StatusOK, gin.H{"success": true, "response": resp})
+}
+
+func (s *Site) handleStartLlmEdit(c *gin.Context) {
+	type Req struct {
+		PageIdentifier string `json:"page_identifier" binding:"required"`
+		EditPrompt     string `json:"edit_prompt" binding:"required"`
+	}
+	type Resp struct {
+		InteractionID  llmEditor.InteractionID `json:"interaction_id"`
+		OpenQuestions  []string                `json:"open_questions"`
+		NewContentHtml string                  `json:"new_content"`
+		ResponseToUser string                  `json:"response_to_user"`
+	}
+
+	var req Req
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Problem binding keys: " + err.Error()})
+		return
+	}
+
+	interaction, err := s.OpenAIEditor.PerformEdit(req.PageIdentifier, req.EditPrompt)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Problem performing edit: " + err.Error()})
+		return
+	}
+
+	resp := Resp{
+		InteractionID: interaction.InteractionID,
+	}
+
+	resp.OpenQuestions = interaction.LastResponse.Memory.OpenQuestions
+	err, html := s.renderAnyMarkdownAsPage(req.PageIdentifier, interaction.LastResponse.NewContent)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Problem rendering new content: " + err.Error()})
+	}
+	resp.NewContentHtml = string(html)
+	resp.ResponseToUser = interaction.LastResponse.ResponseToUser
+
+	c.JSON(http.StatusOK, gin.H{"success": true, "response": resp})
+}
+
+func (s *Site) renderAnyMarkdownAsPage(pageIdent string, newMarkdown string) (error, []byte) {
+	_, frontmatter, err := s.ReadFrontMatter(pageIdent)
+	newContent, err := templating.ExecuteTemplate(newMarkdown, frontmatter, s, s.FrontmatterIndexQueryer)
+	html, err := s.MarkdownRenderer.Render(newContent)
+	return err, html
+}
+
+func (s *Site) handleSaveLlmEdit(c *gin.Context) {
+	type Req struct {
+		InteractionID  llmEditor.InteractionID `json:"interaction_id" binding:"required"`
+		PageIdentifier string                  `json:"page_identifier" binding:"required"`
+	}
+	type Resp struct {
+		Success bool `json:"success"`
+	}
+
+	var req Req
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Problem binding keys: " + err.Error()})
+		return
+	}
+
+	interaction, err := llmEditor.RestoreInteractionFromRAM(req.InteractionID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Problem restoring interaction: " + err.Error()})
+		return
+	}
+
+	if interaction.PageIdentifier != req.PageIdentifier {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Interaction is not for this page."})
+		return
+	}
+
+	identifier, frontmatter, err := s.ReadFrontMatter(req.PageIdentifier)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Problem reading frontmatter: " + err.Error()})
+	}
+
+	frontmatter["llm_memory"] = interaction.LastResponse.Memory.ToFrontmatterMap()
+	tomlString, err := frontmatter.Marshal()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Problem converting frontmatter to toml: " + err.Error()})
+	}
+
+	newPageContent := fmt.Sprintf("+++\n%s\n+++\n\n%s", string(tomlString), interaction.LastResponse.NewContent)
+
+	err = s.updatePageContent(identifier, newPageContent, interaction.PageAccessedTimestamp.Unix())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Problem saving edit: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true, "response": Resp{Success: true}})
 }
