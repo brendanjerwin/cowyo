@@ -14,7 +14,7 @@ require (
 	github.com/karalabe/usb v0.0.2
 	github.com/schollz/versionedtext v1.0.0
 	github.com/stoewer/go-strcase v1.3.0
-	github.com/yuin/goldmark v1.6.0
+	github.com/yuin/goldmark v1.7.0
 	github.com/yuin/goldmark-emoji v1.0.2
 	go.abhg.dev/goldmark/mermaid v0.5.0
 	go.abhg.dev/goldmark/wikilink v0.5.0
